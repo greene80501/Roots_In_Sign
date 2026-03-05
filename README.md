@@ -6,7 +6,7 @@ A **bidirectional sign language translation platform** that bridges the communic
 
 ---
 
-## 🌟 Features
+## Features
 
 ### 1. Sign-to-Text Translation
 - **Real-time ASL Fingerspelling Recognition**: Uses your camera to capture hand gestures
@@ -32,7 +32,7 @@ A **bidirectional sign language translation platform** that bridges the communic
 
 ---
 
-## 🏗️ Architecture & Technology Stack
+## Architecture and Technology Stack
 
 ```
 ┌─────────────────────────────────────────────────────────────────┐
@@ -87,7 +87,7 @@ A **bidirectional sign language translation platform** that bridges the communic
 
 ---
 
-## 📋 Prerequisites
+## Prerequisites
 
 Before setting up the project, ensure you have the following installed:
 
@@ -106,7 +106,7 @@ Before setting up the project, ensure you have the following installed:
 
 ---
 
-## 🚀 Setup Instructions
+## Setup Instructions
 
 ### Step 1: Clone the Repository
 
@@ -159,26 +159,7 @@ source venv/bin/activate
 
 ### Step 4: Install Dependencies
 
-Create a `requirements.txt` file with the following content:
-
-```txt
-flask>=2.3.0
-flask-sqlalchemy>=3.0.0
-flask-login>=0.6.0
-flask-migrate>=4.0.0
-mysql-connector-python>=8.0.0
-werkzeug>=2.3.0
-tensorflow>=2.13.0
-keras>=2.13.0
-mediapipe>=0.10.0
-opencv-python>=4.8.0
-pillow>=10.0.0
-numpy>=1.24.0
-faster-whisper>=0.10.0
-pose-format>=0.2.0
-```
-
-Then install:
+Install all required packages:
 
 ```bash
 pip install -r requirements.txt
@@ -241,7 +222,7 @@ The application will be available at: `http://localhost:5000`
 
 ---
 
-## 📖 How It Works
+## How It Works
 
 ### Sign-to-Text Pipeline
 
@@ -260,7 +241,7 @@ The application will be available at: `http://localhost:5000`
 
 1. **Frame Capture**: User shows ASL hand sign to camera
 2. **Landmark Detection**: MediaPipe Hands extracts 21 hand landmarks (x, y, z coordinates)
-3. **Feature Processing**: Landmarks are flattened into a 63-dimensional vector (21 × 3)
+3. **Feature Processing**: Landmarks are flattened into a 63-dimensional vector (21 x 3)
 4. **Model Prediction**: TensorFlow model predicts the ASL letter (A-Z)
 5. **Result Display**: The predicted letter is displayed to the user
 
@@ -287,7 +268,7 @@ The application will be available at: `http://localhost:5000`
 
 ---
 
-## 🔌 API Endpoints
+## API Endpoints
 
 ### Authentication
 | Endpoint | Method | Description |
@@ -318,7 +299,7 @@ The application will be available at: `http://localhost:5000`
 
 ---
 
-## 🗂️ Project Structure
+## Project Structure
 
 ```
 Roots_In_Sign/
@@ -360,7 +341,7 @@ Roots_In_Sign/
 
 ---
 
-## 🔧 Configuration
+## Configuration
 
 ### Environment Variables
 
@@ -388,7 +369,7 @@ spoken_to_signed_model_size = "distil-small.en"
 
 ---
 
-## 🐛 Troubleshooting
+## Troubleshooting
 
 ### Common Issues
 
@@ -413,9 +394,9 @@ flask run
 
 ---
 
-## 🤝 Contributing
+## Contributing
 
-Contributions are welcome! Please follow these steps:
+Contributions are welcome. Please follow these steps:
 
 1. Fork the repository
 2. Create a feature branch (`git checkout -b feature/amazing-feature`)
@@ -425,13 +406,13 @@ Contributions are welcome! Please follow these steps:
 
 ---
 
-## 📄 License
+## License
 
 This project is licensed under the **Mozilla Public License 2.0** - see the [LICENSE](LICENSE) file for details.
 
 ---
 
-## 🙏 Acknowledgments
+## Acknowledgments
 
 - [MediaPipe](https://mediapipe.dev/) for hand tracking
 - [OpenAI Whisper](https://github.com/openai/whisper) for speech recognition
@@ -440,10 +421,10 @@ This project is licensed under the **Mozilla Public License 2.0** - see the [LIC
 
 ---
 
-## 📧 Contact
+## Contact
 
 For questions or support, please open an issue on GitHub.
 
 ---
 
-**Made with ❤️ for the Deaf and Hard-of-Hearing Community**
+**Made with care for the Deaf and Hard-of-Hearing Community**
