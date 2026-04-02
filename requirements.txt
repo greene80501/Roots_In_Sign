@@ -1,30 +1,42 @@
-# Web Framework
-flask>=2.3.0
+# Python 3.12 recommended (TensorFlow + stack tested there).
+#
+# PyTorch: install the wheel that matches your machine.
+#   CPU:     pip install torch torchvision
+#   CUDA:    pip install torch torchvision --index-url https://download.pytorch.org/whl/cu124
+#
+# FFmpeg must be on PATH (Whisper + H.264 encoding via imageio).
+
+# Web
+flask>=2.3.0,<4
 flask-sqlalchemy>=3.0.0
 flask-login>=0.6.0
 flask-migrate>=4.0.0
-
-# Database
-mysql-connector-python>=8.0.0
-
-# Security
 werkzeug>=2.3.0
+python-dotenv>=1.0.0
 
-# Machine Learning & AI
-tensorflow>=2.13.0
-keras>=2.13.0
-faster-whisper>=0.10.0
-
-# Computer Vision
+# Sign-to-text
+tensorflow>=2.15.0
+keras>=3.0.0
 mediapipe>=0.10.0
 opencv-python>=4.8.0
 pillow>=10.0.0
-
-# Data Processing
 numpy>=1.24.0
 
-# ASL Pose Processing
+# Spoken-to-signed (text / audio → pose → video)
+faster-whisper>=1.0.0
 pose-format>=0.2.0
+pose-to-video>=0.0.1
+imageio[ffmpeg]>=2.31.0
 
-# Utilities
-python-dotenv>=1.0.0
+# Video: pix2pix fallback + optional RealESRGAN upscale
+tf-keras>=2.15.0
+realesrgan>=0.3.0
+basicsr>=1.4.2
+
+# Video: AnimateDiff + ControlNet (GPU; downloads weights on first run)
+torch>=2.2.0
+torchvision>=0.17.0
+diffusers>=0.30.0
+accelerate>=0.30.0
+transformers>=4.40.0
+safetensors>=0.4.0

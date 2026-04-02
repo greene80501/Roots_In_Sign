@@ -1,4 +1,6 @@
-def to_gloss(text, names=[]):
+def to_gloss(text, names=None):
+    if names is None:
+        names = []
     # Step 1: Normalize and split the text
     words = text.strip().split()
     glossed = []
@@ -14,8 +16,8 @@ def to_gloss(text, names=[]):
 
     return ' '.join(glossed)
 
-# Example usage:
-sentence = "Yesterday Wyatt went to the store."
-names = ["Wyatt"]
-gloss = to_gloss(sentence, names)
-print(gloss)
+
+if __name__ == "__main__":
+    _sentence = "Yesterday Wyatt went to the store."
+    _names = ["Wyatt"]
+    print(to_gloss(_sentence, _names))

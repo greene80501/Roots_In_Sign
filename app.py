@@ -1,10 +1,8 @@
-# --- START OF FILE app.py ---
-
 from flask import Flask, request, jsonify, render_template, redirect, url_for, session, Response, stream_with_context
 import base64
 from io import BytesIO
 from PIL import Image
-import files.api.predict as predict_lib # Assuming predict.py is in files/api/
+import files.api.predict as predict_lib
 import tensorflow as tf
 import os
 import datetime
@@ -12,16 +10,26 @@ import uuid
 import traceback
 import tempfile
 import re # Import regular expressions for filename parsing
-import glob # Import glob for file pattern matching
+import glob
+import logging
+
+try:
+    from dotenv import load_dotenv
+    load_dotenv()
+except ImportError:
+    pass
+
+_lvl_name = os.environ.get("LOG_LEVEL", "INFO").upper()
+_lvl = getattr(logging, _lvl_name, logging.INFO)
+logging.basicConfig(level=_lvl, format="%(levelname)s %(message)s")
+log = logging.getLogger(__name__)
 
 # --- Imports for Spoken-to-Signed Feature ---
-# ... (keep existing imports)
 import sys
-# import subprocess # No longer needed as pose_to_video is removed
 import json
 from faster_whisper import WhisperModel
 from pose_format import Pose
-from pose_format.pose_visualizer import PoseVisualizer # Keep for GIF
+from pose_format.pose_visualizer import PoseVisualizer
 # Ensure the gloss_to_pose module is on the Python path.
 # You might need to adjust this path depending on your exact project structure
 # Assuming it's adjacent to the main script or installable
@@ -29,15 +37,13 @@ try:
     sys.path.append(os.path.join(os.getcwd(), "spoken-to-signed-translation", "spoken_to_signed", "gloss_to_pose"))
     from concatenate import concatenate_poses
 except ImportError as e:
-    print(f"Warning: Could not import 'concatenate_poses'. Ensure 'gloss_to_pose' module is accessible: {e}")
-    # Define a dummy function if needed, or let it fail later
+    log.warning("concatenate_poses unavailable (spoken-to-signed may break): %s", e)
+
     def concatenate_poses(poselist):
-        print("WARNING: Using dummy concatenate_poses function!")
-        if not poselist: return None # Or raise error
-        # Basic concatenation might involve just taking the first pose or raising an error
-        # For simplicity, let's just return the first pose if it exists
+        log.warning("dummy concatenate_poses — returning first pose only")
+        if not poselist:
+            return None
         return poselist[0]
-# --- End Imports for Spoken-to-Signed Feature ---
 
 
 # --- Database & Auth Setup ---
@@ -52,22 +58,15 @@ TEMPLATE_FOLDER = os.path.join(os.path.dirname(__file__), 'files', 'templates')
 # Point static folder to 'files/static'
 STATIC_FOLDER_PATH = os.path.join(os.path.dirname(__file__), 'files', 'static')
 app = Flask(__name__, template_folder=TEMPLATE_FOLDER, static_folder=STATIC_FOLDER_PATH)
-# Flask will automatically map the URL path '/static' to the contents of STATIC_FOLDER_PATH
 
-# **IMPORTANT: Set a strong SECRET_KEY for production!**
-app.config['SECRET_KEY'] = os.environ.get('SECRET_KEY', 'a_very_insecure_default_key_for_dev_12345') # Added more default chars for basic security
+_DEFAULT_SECRET = 'a_very_insecure_default_key_for_dev_12345'
+app.config['SECRET_KEY'] = os.environ.get('SECRET_KEY', _DEFAULT_SECRET)
+if app.config['SECRET_KEY'] == _DEFAULT_SECRET:
+    log.warning("SECRET_KEY is unset — using insecure default. Set SECRET_KEY for production.")
 
-# --- MySQL (XAMPP) Database Configuration ---
-# !!! REPLACE placeholders with your actual MySQL details !!!
-db_username = os.environ.get('DB_USER', 'sign2speak_user')      # Use environment variable or default
-db_password = os.environ.get('DB_PASS', 'Sv227199')   # Use environment variable or default
-db_host = os.environ.get('DB_HOST', 'localhost')              # Use environment variable or default
-db_port = os.environ.get('DB_PORT', '3306')                   # Use environment variable or default
-database_name = os.environ.get('DB_NAME', 'sign2speak_db')     # Use environment variable or default
-
-app.config['SQLALCHEMY_DATABASE_URI'] = (
-    f'mysql+mysqlconnector://{db_username}:{db_password}@{db_host}:{db_port}/{database_name}'
-)
+# --- SQLite Database Configuration ---
+DB_PATH = os.environ.get('DB_PATH', os.path.join(os.path.dirname(__file__), 'sign2speak.db'))
+app.config['SQLALCHEMY_DATABASE_URI'] = f'sqlite:///{DB_PATH}'
 app.config['SQLALCHEMY_TRACK_MODIFICATIONS'] = False
 
 # Initialize extensions
@@ -116,7 +115,6 @@ os.makedirs(TEMP_DIR_AUDIO, exist_ok=True)
 # Ensure 'videos' subdirectory exists in static folder (for GIF output)
 VIDEOS_DIR = os.path.join(STATIC_FOLDER_PATH, "videos")
 os.makedirs(VIDEOS_DIR, exist_ok=True)
-print(f"Directory for generated GIFs/videos created/exists at: {VIDEOS_DIR}")
 
 # Base ASL pose directory path check (corrected path)
 ASL_POSE_DIR = os.path.join(BASE_DIR, "files", "static", "asl")
@@ -146,6 +144,293 @@ try:
 except Exception as e:
     print(f"Error loading faster-whisper model '{spoken_to_signed_model_size}': {e}")
     print("Spoken-to-signed GIF generation endpoint /process will likely fail.")
+
+# --- pix2pix Pose-to-Video Helper ---
+SIGN_MODELS_DIR = os.path.join(os.path.expanduser("~"), ".sign", "models")
+PIX2PIX_MODEL_PATH = os.path.join(SIGN_MODELS_DIR, "pix2pix.h5")
+REALESRGAN_MODEL_PATH = os.path.join(SIGN_MODELS_DIR, "RealESRGAN_x4plus_anime_6B.pth")
+REALESRGAN_MODEL_URL = "https://github.com/xinntao/Real-ESRGAN/releases/download/v0.2.2.4/RealESRGAN_x4plus_anime_6B.pth"
+CONTROLNET_MODEL = "sign/sd-controlnet-mediapipe"   # HuggingFace repo — auto-downloaded on first use
+
+
+def _ensure_pix2pix_model():
+    if not os.path.exists(PIX2PIX_MODEL_PATH):
+        print("Downloading pix2pix model (~200MB)…")
+        os.makedirs(SIGN_MODELS_DIR, exist_ok=True)
+        import urllib.request
+        urllib.request.urlretrieve(
+            "https://firebasestorage.googleapis.com/v0/b/sign-mt-assets/o/models%2Fgenerator%2Fmodel.h5?alt=media",
+            PIX2PIX_MODEL_PATH
+        )
+        print("pix2pix model downloaded.")
+    return PIX2PIX_MODEL_PATH
+
+
+def _ensure_realesrgan_model():
+    if not os.path.exists(REALESRGAN_MODEL_PATH):
+        print("Downloading RealESRGAN upscaler model (~17MB)…")
+        os.makedirs(SIGN_MODELS_DIR, exist_ok=True)
+        import urllib.request
+        urllib.request.urlretrieve(REALESRGAN_MODEL_URL, REALESRGAN_MODEL_PATH)
+        print("RealESRGAN model downloaded.")
+    return REALESRGAN_MODEL_PATH
+
+
+_pix2pix_model = None
+_realesrgan_upsampler = None
+_animatediff_pipe = None
+
+
+def _load_pix2pix_model():
+    global _pix2pix_model
+    if _pix2pix_model is not None:
+        return _pix2pix_model
+    model_path = _ensure_pix2pix_model()
+    os.environ.setdefault('TF_USE_LEGACY_KERAS', '1')
+    import tf_keras as keras
+    print("Loading pix2pix model…")
+    _pix2pix_model = keras.models.load_model(model_path, compile=False)
+    print("pix2pix model loaded.")
+    return _pix2pix_model
+
+
+def _load_realesrgan():
+    global _realesrgan_upsampler
+    if _realesrgan_upsampler is not None:
+        return _realesrgan_upsampler
+    try:
+        model_path = _ensure_realesrgan_model()
+        # torchvision ≥0.16 removed functional_tensor; patch it so basicsr/realesrgan work
+        import sys, torchvision.transforms.functional as _tvf_compat
+        sys.modules.setdefault('torchvision.transforms.functional_tensor', _tvf_compat)
+        from basicsr.archs.rrdbnet_arch import RRDBNet
+        from realesrgan import RealESRGANer
+        # 6B = lightweight anime model (6 blocks)
+        rrdb = RRDBNet(num_in_ch=3, num_out_ch=3, num_feat=64,
+                       num_block=6, num_grow_ch=32, scale=4)
+        _realesrgan_upsampler = RealESRGANer(
+            scale=4,
+            model_path=model_path,
+            model=rrdb,
+            tile=128,         # tile size to avoid VRAM OOM on CPU
+            tile_pad=10,
+            pre_pad=0,
+            half=False,       # CPU inference — full precision
+        )
+        print("RealESRGAN upsampler loaded.")
+    except Exception as e:
+        print(f"RealESRGAN load failed ({e}) — upscaling disabled.")
+        _realesrgan_upsampler = None
+    return _realesrgan_upsampler
+
+
+def _upscale_frame(frame_rgb: "np.ndarray") -> "np.ndarray":
+    """4× upscale one uint8 RGB frame. Falls back to Lanczos if ESRGAN unavailable."""
+    import numpy as np
+    import cv2
+    upsampler = _load_realesrgan()
+    if upsampler is not None:
+        try:
+            # RealESRGANer expects BGR
+            bgr = cv2.cvtColor(frame_rgb, cv2.COLOR_RGB2BGR)
+            out_bgr, _ = upsampler.enhance(bgr, outscale=4)
+            return cv2.cvtColor(out_bgr, cv2.COLOR_BGR2RGB)
+        except Exception as e:
+            print(f"ESRGAN frame error ({e}), falling back to Lanczos")
+    # Fallback: high-quality Lanczos 4×
+    h, w = frame_rgb.shape[:2]
+    return cv2.resize(frame_rgb, (w * 4, h * 4), interpolation=cv2.INTER_LANCZOS4)
+
+
+def _write_frames_to_video(frames, video_path: str, fps: int):
+    """Write an iterable of RGB uint8 numpy frames to an H.264 MP4."""
+    import imageio
+    writer = imageio.get_writer(
+        video_path, fps=fps, codec='libx264', quality=9,
+        output_params=['-pix_fmt', 'yuv420p', '-preset', 'slow', '-crf', '16']
+    )
+    count = 0
+    for frame in frames:
+        writer.append_data(frame)
+        count += 1
+    writer.close()
+    return count
+
+
+_ANIMATEDIFF_CHUNK = 16   # motion adapter v1-5-2 uses 16-frame positional encoding
+
+
+def _load_animatediff_pipeline():
+    """Load AnimateDiff + ControlNet pipeline once and cache it."""
+    global _animatediff_pipe
+    if _animatediff_pipe is not None:
+        return _animatediff_pipe
+
+    import torch
+    from diffusers import (AnimateDiffControlNetPipeline, ControlNetModel,
+                           MotionAdapter, DDIMScheduler)
+
+    print("Loading AnimateDiff + ControlNet pipeline…")
+    # cudnnGetLibConfig (Error 127) = the cuDNN DLL on this system is missing that
+    # symbol. Disabling cuDNN forces PyTorch to use plain CUDA kernels instead —
+    # slightly slower per step but stable. AnimateDiff batches 16 frames per pass
+    # so total time is still far better than frame-by-frame ControlNet.
+    torch.backends.cudnn.enabled = False
+
+    adapter = MotionAdapter.from_pretrained(
+        "guoyww/animatediff-motion-adapter-v1-5-2",
+        torch_dtype=torch.float16,
+    )
+    controlnet = ControlNetModel.from_pretrained(
+        CONTROLNET_MODEL, torch_dtype=torch.float16)
+    pipe = AnimateDiffControlNetPipeline.from_pretrained(
+        "runwayml/stable-diffusion-v1-5",
+        motion_adapter=adapter,
+        controlnet=controlnet,
+        safety_checker=None,
+        torch_dtype=torch.float16,
+    )
+    # DDIM works well with AnimateDiff; UniPC can cause artifacts on video
+    pipe.scheduler = DDIMScheduler.from_config(
+        pipe.scheduler.config,
+        clip_sample=False, timestep_spacing="linspace", beta_schedule="linear",
+    )
+    pipe.to("cuda")   # SD 1.5 + ControlNet + motion adapter ≈ 5GB fp16
+
+    _animatediff_pipe = pipe
+    print("AnimateDiff pipeline ready.")
+    return _animatediff_pipe
+
+
+def _pose_to_video_animatediff(pose, video_path: str, fps: int) -> bool:
+    """
+    AnimateDiff + ControlNet — generates the entire clip in one diffusion pass
+    per 16-frame chunk, giving temporal consistency (no frame flicker).
+    First run downloads ~800MB motion adapter + SD 1.5 weights.
+    """
+    import torch
+    if not torch.cuda.is_available():
+        raise RuntimeError("CUDA GPU not available.")
+
+    import copy
+    import numpy as np
+    from PIL import Image
+    from pose_format.utils.generic import correct_wrists, reduce_holistic
+    from pose_to_video.conditional.controlnet import get_rgb_frames
+
+    print("Running AnimateDiff + ControlNet…")
+
+    pipe = _load_animatediff_pipeline()
+
+    # --- Prepare pose ---
+    pose_copy = copy.deepcopy(pose)
+    pose_copy = reduce_holistic(pose_copy)
+    correct_wrists(pose_copy)
+    scale = 512
+    pose_copy.body.data = pose_copy.body.data / np.array(
+        [pose_copy.header.dimensions.width / scale,
+         pose_copy.header.dimensions.height / scale, 1])
+    pose_copy.header.dimensions.width = pose_copy.header.dimensions.height = scale
+
+    prompt = "person signing ASL, photorealistic, black shirt, neutral background"
+    negative_prompt = "blurry, low quality, distorted hands, extra fingers, cartoon, watermark"
+
+    # Collect all pose frames up front (needed to know total count)
+    all_pose_imgs = [Image.fromarray(f) for f in get_rgb_frames(pose_copy)]
+    total = len(all_pose_imgs)
+    print(f"Total frames: {total} — processing in chunks of {_ANIMATEDIFF_CHUNK}")
+
+    all_output_frames = []
+    chunk_size = _ANIMATEDIFF_CHUNK
+
+    for i in range(0, total, chunk_size):
+        chunk = all_pose_imgs[i: i + chunk_size]
+        n = len(chunk)
+        # Pad last chunk to chunk_size so the motion module gets full context
+        padded = chunk + [chunk[-1]] * (chunk_size - n)
+
+        out = pipe(
+            prompt=prompt,
+            negative_prompt=negative_prompt,
+            num_frames=chunk_size,
+            conditioning_frames=padded,
+            width=512,
+            height=512,
+            num_inference_steps=15,
+            guidance_scale=7.5,
+            controlnet_conditioning_scale=1.0,
+            generator=torch.Generator().manual_seed(42),
+        )
+        frames = [np.array(f) for f in out.frames[0][:n]]
+        all_output_frames.extend(frames)
+        print(f"  Chunk {i // chunk_size + 1}/{(total + chunk_size - 1) // chunk_size} done")
+
+    count = _write_frames_to_video(iter(all_output_frames), video_path, fps)
+    print(f"AnimateDiff done: {count} frames → {video_path}")
+    return count > 0
+
+
+def _pose_to_video_pix2pix(pose, video_path: str, fps: int) -> bool:
+    """pix2pix (256×256) → RealESRGAN 4× (1024×1024) → H.264."""
+    import copy
+    import numpy as np
+    from pose_format.utils.generic import correct_wrists, reduce_holistic
+    from pose_to_video.conditional.pix2pix import pose_to_video as p2p_frames
+
+    pose_copy = copy.deepcopy(pose)
+    pose_copy = reduce_holistic(pose_copy)
+    correct_wrists(pose_copy)
+
+    print("Running pix2pix fallback…")
+    raw_frames = list(p2p_frames(pose_copy, PIX2PIX_MODEL_PATH))
+    if not raw_frames:
+        return False
+
+    print(f"Upscaling {len(raw_frames)} frames with RealESRGAN…")
+
+    def upscaled():
+        for f in raw_frames:
+            yield _upscale_frame(f)
+
+    count = _write_frames_to_video(upscaled(), video_path, fps)
+    return count > 0
+
+
+def _pose_to_video(pose: Pose, video_path: str) -> bool:
+    """
+    Try AnimateDiff + ControlNet (GPU, temporally consistent) first;
+    fall back to pix2pix + RealESRGAN on failure.
+    Returns True on success.
+    """
+    try:
+        fps = int(pose.body.fps)
+    except Exception:
+        fps = 25
+
+    # --- Attempt 1: AnimateDiff + ControlNet (GPU, temporally consistent) ---
+    try:
+        import torch
+        if torch.cuda.is_available():
+            if _pose_to_video_animatediff(pose, video_path, fps):
+                if os.path.exists(video_path) and os.path.getsize(video_path) > 0:
+                    print(f"AnimateDiff video saved: {video_path} ({os.path.getsize(video_path)//1024} KB)")
+                    return True
+    except Exception as e:
+        print(f"AnimateDiff failed ({e}), falling back to pix2pix…")
+        traceback.print_exc()
+
+    # --- Attempt 2: pix2pix + RealESRGAN ---
+    try:
+        if _pose_to_video_pix2pix(pose, video_path, fps):
+            if os.path.exists(video_path) and os.path.getsize(video_path) > 0:
+                print(f"pix2pix video saved: {video_path} ({os.path.getsize(video_path)//1024} KB)")
+                return True
+    except Exception as e:
+        print(f"pix2pix also failed ({e})")
+        traceback.print_exc()
+
+    return False
+
 
 # --- Helper function to pass auth status to templates ---
 @app.context_processor
@@ -449,34 +734,32 @@ def stream_process_audio_file(audio_path):
              return
 
 
-        # STEP 5: Generate a GIF preview of the pose.
-        gif_filename = f"{uuid.uuid4()}.gif"
-        gif_path = os.path.join(VIDEOS_DIR, gif_filename) # Save GIF in files/static/videos
-        try:
-            yield f"data: {json.dumps({'step': 'info', 'message': 'Generating GIF preview...'})}\n\n"
-            visualizer = PoseVisualizer(newpose)
-            visualizer.save_gif(gif_path, visualizer.draw())
-            gif_url = url_for('static', filename=f'videos/{gif_filename}', _external=False)
-            # Send GIF URL as the final successful step
-            yield f"data: {json.dumps({'step': 'pose_gif', 'gif_filename': gif_filename, 'url': gif_url})}\n\n"
-            print(f"GIF preview saved to {gif_path}")
-        except Exception as e:
-            error_msg = f"Error generating GIF: {e}"
-            print(f"ERROR: {error_msg}")
-            yield f"data: {json.dumps({'step': 'error', 'error': error_msg})}\n\n"
-            return # Stop if GIF fails
+        # STEP 5: Attempt pix2pix realistic video generation
+        base_id = str(uuid.uuid4())
+        mp4_filename = base_id + ".mp4"
+        mp4_path = os.path.join(VIDEOS_DIR, mp4_filename)
+        gif_filename = base_id + ".gif"
+        gif_path = os.path.join(VIDEOS_DIR, gif_filename)
 
-        # STEP 6: Save the concatenated pose into a temporary file
-        try:
-            temp_pose_path = os.path.join(TEMP_DIR_AUDIO, f"{uuid.uuid4()}.pose")
-            with open(temp_pose_path, "wb") as f: newpose.write(f)
-            print(f"Temporary pose saved to {temp_pose_path} (will be cleaned up)")
-        except Exception as e:
-            print(f"Warning: Failed to save temporary pose file: {e}")
-            # Don't yield an error for this, just log it
+        yield f"data: {json.dumps({'step': 'info', 'message': 'Generating realistic video with pix2pix...'})}\n\n"
+        video_ok = _pose_to_video(newpose, mp4_path)
 
-
-        # --- VIDEO GENERATION STEP REMOVED ---
+        if video_ok and os.path.exists(mp4_path):
+            video_url = url_for('static', filename=f'videos/{mp4_filename}', _external=False)
+            yield f"data: {json.dumps({'step': 'pose_video', 'filename': mp4_filename, 'url': video_url})}\n\n"
+            print(f"Realistic video saved to {mp4_path}")
+        else:
+            # Fallback: generate skeleton GIF
+            yield f"data: {json.dumps({'step': 'info', 'message': 'pix2pix unavailable — generating skeleton GIF...'})}\n\n"
+            try:
+                visualizer = PoseVisualizer(newpose)
+                visualizer.save_gif(gif_path, visualizer.draw())
+                gif_url = url_for('static', filename=f'videos/{gif_filename}', _external=False)
+                yield f"data: {json.dumps({'step': 'pose_gif', 'gif_filename': gif_filename, 'url': gif_url})}\n\n"
+                print(f"Fallback GIF saved to {gif_path}")
+            except Exception as e:
+                yield f"data: {json.dumps({'step': 'error', 'error': 'Failed to generate output: ' + str(e)})}\n\n"
+                return
 
     except Exception as e:
         print(f"Unexpected error in stream_process_audio_file: {e}"); traceback.print_exc()
@@ -493,9 +776,76 @@ def stream_process_audio_file(audio_path):
         yield f"data: {json.dumps({'step': 'info', 'message': 'Processing finished.'})}\n\n"
 
 
+@app.route("/process_text", methods=["POST"])
+def process_text_for_gif():
+    """Accepts a plain text string and streams the pose GIF SSE response directly."""
+    data = request.get_json(silent=True) or {}
+    text = (data.get('text') or '').strip()
+    if not text:
+        return jsonify({"error": "No text provided."}), 400
+
+    def stream_from_text(input_text):
+        def sse(payload):
+            return "data: " + json.dumps(payload) + "\n\n"
+
+        yield sse({'step': 'transcription', 'transcription': input_text})
+        tokens = [w.lower().strip(".,!?;:") for w in input_text.split() if w.strip(".,!?;:")]
+        if not tokens:
+            yield sse({'step': 'error', 'error': 'No valid words found.'})
+            return
+        poselist = []
+        missing = []
+        yield sse({'step': 'info', 'message': 'Loading poses for: ' + ' '.join(tokens)})
+        for token in tokens:
+            pose_file = os.path.join(ASL_POSE_DIR, token + ".pose")
+            if not os.path.isfile(pose_file):
+                missing.append(token)
+                continue
+            try:
+                with open(pose_file, "rb") as f:
+                    pose = Pose.read(f.read())
+                poselist.append(pose)
+            except Exception as e:
+                yield sse({'step': 'warning', 'message': 'Error reading pose for "' + token + '": ' + str(e)})
+        if missing:
+            yield sse({'step': 'warning', 'message': 'Missing pose files for: ' + ', '.join(missing)})
+        if not poselist:
+            yield sse({'step': 'error', 'error': 'No valid pose files found for the given text.'})
+            return
+        yield sse({'step': 'info', 'message': 'Concatenating poses...'})
+        newpose = concatenate_poses(poselist)
+        if newpose is None:
+            yield sse({'step': 'error', 'error': 'Failed to concatenate poses.'})
+            return
+        base_id = str(uuid.uuid4())
+        mp4_filename = base_id + ".mp4"
+        mp4_path = os.path.join(VIDEOS_DIR, mp4_filename)
+        gif_filename = base_id + ".gif"
+        gif_path = os.path.join(VIDEOS_DIR, gif_filename)
+
+        yield sse({'step': 'info', 'message': 'Generating realistic video with pix2pix...'})
+        video_ok = _pose_to_video(newpose, mp4_path)
+
+        if video_ok and os.path.exists(mp4_path):
+            video_url = url_for('static', filename='videos/' + mp4_filename, _external=False)
+            yield sse({'step': 'pose_video', 'filename': mp4_filename, 'url': video_url})
+        else:
+            yield sse({'step': 'info', 'message': 'pix2pix unavailable — generating skeleton GIF...'})
+            try:
+                visualizer = PoseVisualizer(newpose)
+                visualizer.save_gif(gif_path, visualizer.draw())
+                gif_url = url_for('static', filename='videos/' + gif_filename, _external=False)
+                yield sse({'step': 'pose_gif', 'gif_filename': gif_filename, 'url': gif_url})
+            except Exception as e:
+                yield sse({'step': 'error', 'error': 'Output error: ' + str(e)})
+        yield sse({'step': 'info', 'message': 'Processing finished.'})
+
+    return Response(stream_with_context(stream_from_text(text)), mimetype="text/event-stream")
+
+
 @app.route("/process", methods=["POST"])
 #@login_required
-def process_audio_for_gif(): # Renamed function
+def process_audio_for_gif():
     """
     Receives audio, saves temporarily, and starts the SSE stream for
     transcription and pose GIF generation based on transcribed words.
@@ -506,13 +856,11 @@ def process_audio_for_gif(): # Renamed function
     audio_file = request.files["audio"]
     if audio_file.filename == '': return jsonify({"error": "No selected audio file."}), 400
 
-    # Determine suffix from original filename if possible, otherwise default
     _, suffix = os.path.splitext(audio_file.filename)
-    if not suffix: suffix = ".webm" # Default if no extension found
+    if not suffix: suffix = ".webm"
 
     audio_path = None
     try:
-        # Save audio temporarily (ensure TEMP_DIR_AUDIO exists)
         with tempfile.NamedTemporaryFile(delete=False, suffix=suffix, dir=TEMP_DIR_AUDIO) as tmp: audio_path = tmp.name
         audio_file.save(audio_path); print(f"Temporary audio saved to: {audio_path}")
     except Exception as e:
@@ -526,17 +874,6 @@ def process_audio_for_gif(): # Renamed function
 
 # --- Main Execution ---
 if __name__ == '__main__':
-    # Instructions for running:
-    # 1. Ensure MySQL/XAMPP is running and database/user exist. Update credentials above or use ENV variables.
-    # 2. Ensure virtual environment is activated.
-    # 3. Set FLASK_APP=app.py (using Powershell: $env:FLASK_APP = "app.py" OR using bash: export FLASK_APP=app.py)
-    # 4. Run DB migrations if needed: flask db init (once), flask db migrate -m "message", flask db upgrade
-    # 5. Install dependencies: pip install -r requirements.txt (or manually install all listed imports)
-    #    Ensure ffmpeg is installed system-wide and in PATH (for whisper).
-    # 6. Ensure necessary lowercase `.pose` files exist in 'files/static/asl/' (e.g., 'hello.pose', 'world.pose')
-    # 7. Run: flask run --host=0.0.0.0 --port=5000
-    #    Use debug=True ONLY for development: flask run --host=0.0.0.0 --port=5000 --debug
-    #    For production, use a proper WSGI server like Gunicorn or uWSGI.
-    app.run(debug=False, host='0.0.0.0', port=5000) # Set debug=True for development, but False for stability
-
-# --- END OF FILE app.py ---
+    # Dev only — use a WSGI server in production (see README).
+    debug = os.environ.get('FLASK_DEBUG', '').lower() in ('1', 'true', 'yes')
+    app.run(debug=debug, host='0.0.0.0', port=int(os.environ.get('PORT', '5000')))

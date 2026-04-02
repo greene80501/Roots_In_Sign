@@ -127,8 +127,10 @@ celerybeat.pid
 # SageMath parsed files
 *.sage.py
 
-# Environments
+# Environments (never commit secrets — use .env.example)
 .env
+.env.*
+!.env.example
 .venv
 env/
 venv/
@@ -172,3 +174,21 @@ cython_debug/
 
 # PyPI configuration file
 .pypirc
+
+# Local databases / runtime data
+sign2speak.db
+*.db
+
+# Generated uploads and outputs
+files/api/tmp/**
+!files/api/tmp/.gitkeep
+files/static/videos/*
+!files/static/videos/.gitkeep
+temp/
+
+# MediaPipe task bundle (download with scripts/download_hand_landmarker.py)
+files/model/hand_landmarker.task
+
+# IDE
+.idea/
+.vscode/
